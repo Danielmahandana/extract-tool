@@ -64,13 +64,15 @@ def test_handler():
     assert pdf_bytes1.startswith(b"%PDF-")
     print(f"Successfully downloaded authentic PDF ({len(pdf_bytes1)} bytes) from {src1} ({final_url1})")
 
-    # Test literature search by string
-    print("Testing search_academic_literature by query string...")
+    # Test literature search by string with strict open-access filtering
+    print("Testing search_academic_literature with strict OA filtering...")
     search_results, total = search_academic_literature("machine learning systematic review", max_results=3, open_access_only=True)
     assert total > 0, "Expected non-zero total matches"
     assert len(search_results) == 3, f"Expected 3 results, got {len(search_results)}"
-    assert search_results[0]["title"], "Expected title in search result"
-    print(f"Search passed! Found {total:,} works. Top result: {search_results[0]['title']}")
+    for r in search_results:
+        assert r["open_access"] == "Open Access", f"Expected Open Access, got {r['open_access']}"
+        assert r["pdf_url"], f"Expected direct PDF link, got empty for {r['title']}"
+    print(f"Strict OA search passed! All {len(search_results)} results have verified OA status and direct PDF URLs.")
 
     # Test report generation
     records = [

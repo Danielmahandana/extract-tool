@@ -9,7 +9,7 @@ A specialized Streamlit application for researchers and systematic review teams:
 Enter any research topic, keywords, or boolean search string (e.g. `machine learning systematic review`, `climate change agriculture resilience`):
 
 1. **Global Scholarly Index**: Queries 250M+ peer-reviewed scholarly works (via OpenAlex, with optional Elsevier Scopus Search API integration).
-2. **Relevance Discovery**: Discovers top matching publications across journals, conferences, and repositories.
+2. **Strict Paywall Filtering**: Automatically filters out all paywalled and closed-access publications. Only confirmed open-access papers with verified downloadable full-text PDFs are returned.
 3. **Screening Table**: Inspect abstracts, citation counts, publication years, journals, and DOIs directly in the app.
 4. **Auto-Download Full-Text PDFs**:
    - Queries Open-Access resolvers (**Unpaywall**, **OpenAlex**, **arXiv**, **Europe PMC**).

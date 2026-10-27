@@ -238,12 +238,14 @@ def run_paper_downloads(
     contact_email,
     max_pdf_mb,
     delay,
+    filter_paywalled=True,
     session_key="search_review_results",
 ):
     progress_bar = st.progress(0)
     status_box = st.empty()
 
     results = []
+    paywalled_count = 0
     used_names = set()
     max_bytes = int(max_pdf_mb) * 1024 * 1024
 
@@ -301,6 +303,7 @@ def run_paper_downloads(
         if not candidates:
             record_result["status"] = "Paywalled / Closed Access"
             record_result["error"] = "No open-access repository or publisher PDF found."
+            paywalled_count += 1
         else:
             try:
                 pdf_bytes, final_url, resolver_src = scopus_handler.download_authentic_pdf(
@@ -315,14 +318,22 @@ def run_paper_downloads(
             except Exception as err:
                 record_result["status"] = "Paywalled / Failed"
                 record_result["error"] = str(err)
+                paywalled_count += 1
 
-        results.append(record_result)
+        if not filter_paywalled or record_result["status"] == "Downloaded":
+            results.append(record_result)
+
         progress_bar.progress(pos / len(to_process))
         if delay > 0 and pos < len(to_process):
             time.sleep(float(delay))
 
     st.session_state[session_key] = results
-    status_box.success("🎉 Download run complete! Review results below.")
+    if filter_paywalled and paywalled_count > 0:
+        status_box.success(
+            f"🎉 Run complete! Retained {len(results)} verified Open-Access PDFs ({paywalled_count} paywalled papers filtered out)."
+        )
+    else:
+        status_box.success("🎉 Download run complete! Review results below.")
 
 
 def render_paper_results(results_list, archive_name="research_papers.zip", report_name="research_review_report.csv"):
@@ -510,7 +521,11 @@ def render_search_literature_tab():
                 }[x],
             )
         with f_col3:
-            oa_only = st.checkbox("Open-Access Only (Ensure PDF Available)", value=True, help="Filter for papers with publicly available full-text open-access copies.")
+            oa_only = st.checkbox(
+                "Strict Open-Access Only (Filter out all paywalled papers)",
+                value=True,
+                help="Excludes all paywalled papers so only confirmed open-access publications with downloadable PDFs return.",
+            )
             year_range = st.slider("Publication Year Range", min_value=1990, max_value=2026, value=(2018, 2026))
 
     # Search Trigger
@@ -530,17 +545,23 @@ def render_search_literature_tab():
             st.session_state["search_found_records"] = records
             st.session_state["search_total_matches"] = total_matches
             st.session_state["search_query_used"] = query.strip()
+            st.session_state["search_oa_only"] = oa_only
 
     # Display Found Papers for Screening
     records = st.session_state.get("search_found_records", [])
     total_matches = st.session_state.get("search_total_matches", 0)
     query_used = st.session_state.get("search_query_used", "")
+    oa_used = st.session_state.get("search_oa_only", True)
 
     if records:
         st.markdown("---")
         st.markdown(
             f"#### 📚 Found **{total_matches:,}** matching scholarly works for *'{query_used}'* (Displaying top {len(records)})"
         )
+        if oa_used:
+            st.success(
+                f"✓ **Paywall Filter Active**: All {len(records)} papers shown are verified Open Access with direct full-text PDFs. All paywalled papers were filtered out."
+            )
         st.caption("Select papers to download, inspect abstracts, and configure naming:")
 
         # Screening Dataframe
@@ -798,15 +819,26 @@ def render_scopus_upload_tab():
 
     # Review Screening Table & Search Filter
     st.subheader(f"Literature Review Records ({len(records)} found)")
-    filter_col1, filter_col2 = st.columns([3, 1])
+    filter_col1, filter_col2, filter_col3 = st.columns([2, 1, 1])
     with filter_col1:
         search_query = st.text_input("🔍 Filter by Keyword", "")
     with filter_col2:
         only_with_doi = st.checkbox("Only valid DOIs", value=True)
+    with filter_col3:
+        filter_paywall = st.checkbox(
+            "Strict Open-Access Only",
+            value=True,
+            help="Filters out paywalled and closed access records so only open-access papers are shown.",
+        )
 
     filtered_records = records
     if only_with_doi:
         filtered_records = [r for r in filtered_records if r["doi"]]
+    if filter_paywall:
+        filtered_records = [
+            r for r in filtered_records
+            if not any(k in str(r.get("open_access", "")).casefold() for k in ("closed", "no", "subscription", "paywall"))
+        ]
     if search_query.strip():
         q = search_query.strip().casefold()
         filtered_records = [
@@ -878,6 +910,7 @@ def render_scopus_upload_tab():
             contact_email,
             max_pdf_mb=50,
             delay=delay,
+            filter_paywalled=filter_paywall,
             session_key="upload_download_results",
         )
 

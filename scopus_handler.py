@@ -389,14 +389,17 @@ def search_academic_literature(
 
     if source_database == "scopus" and scopus_api_key:
         try:
+            scopus_query = query
+            if open_access_only:
+                scopus_query = f"({query}) AND OPENACCESS(1)"
             headers = {
                 "X-ELS-APIKey": scopus_api_key.strip(),
                 "Accept": "application/json",
                 "User-Agent": ACADEMIC_USER_AGENT,
             }
             params = {
-                "query": query,
-                "count": min(max_results, 100),
+                "query": scopus_query,
+                "count": min(max(max_results * 2, 25), 100),
             }
             scopus_url = "https://api.elsevier.com/content/search/scopus"
             resp = requests.get(scopus_url, headers=headers, params=params, timeout=timeout)
@@ -404,11 +407,15 @@ def search_academic_literature(
                 data = resp.json().get("search-results", {})
                 total_matches = int(data.get("opensearch:totalResults", "0"))
                 entries = data.get("entry", [])
-                for idx, entry in enumerate(entries, start=1):
+                for entry in entries:
                     raw_doi = entry.get("prism:doi", "")
                     doi = clean_doi(raw_doi)
+                    oa_flag = entry.get("openaccessFlag") in ("true", "1", 1, True)
+                    if open_access_only and not oa_flag:
+                        continue
+                    
                     records.append({
-                        "index": idx,
+                        "index": len(records) + 1,
                         "title": entry.get("dc:title", "Untitled"),
                         "authors": entry.get("dc:creator", "Unknown Author"),
                         "year": (entry.get("prism:coverDate", "")[:4] or ""),
@@ -416,24 +423,29 @@ def search_academic_literature(
                         "citations": int(entry.get("citedby-count", 0)),
                         "doi": doi,
                         "raw_doi": raw_doi,
-                        "open_access": "Yes" if entry.get("openaccessFlag") else "Unknown",
+                        "open_access": "Open Access" if oa_flag else "Paywalled",
                         "pdf_url": "",
                         "abstract": "",
                         "source_db": "Scopus API",
                     })
+                    if len(records) >= max_results:
+                        break
                 return records, total_matches
         except Exception:
             pass
 
     try:
+        # Request a larger pool so after filtering out paywalled records, we satisfy max_results
+        fetch_limit = min(max(max_results * 2, 30), 100)
         params = {
             "search": query,
-            "per-page": min(max_results, 100),
+            "per-page": fetch_limit,
             "sort": sort_by,
         }
         filters = []
         if open_access_only:
             filters.append("is_oa:true")
+            filters.append("has_oa_accepted_or_published_version:true")
         if start_year and end_year:
             filters.append(f"publication_year:{start_year}-{end_year}")
         elif start_year:
@@ -454,14 +466,12 @@ def search_academic_literature(
             data = resp.json()
             total_matches = data.get("meta", {}).get("count", 0)
             items = data.get("results", [])
-            for idx, item in enumerate(items, start=1):
-                authorships = item.get("authorships", [])
-                author_names = [a.get("author", {}).get("display_name", "") for a in authorships if a.get("author")]
-                formatted_authors = ", ".join(author_names[:4]) + (" et al." if len(author_names) > 4 else "")
-                if not formatted_authors:
-                    formatted_authors = "Unknown Author"
+            for item in items:
+                is_oa = item.get("open_access", {}).get("is_oa", False)
+                if open_access_only and not is_oa:
+                    # Filter out paywalled paper
+                    continue
 
-                doi = clean_doi(item.get("doi"))
                 best_oa = item.get("best_oa_location") or {}
                 pdf_url = best_oa.get("pdf_url") or ""
                 if not pdf_url:
@@ -470,11 +480,34 @@ def search_academic_literature(
                             pdf_url = loc.get("pdf_url")
                             break
 
+                doi = clean_doi(item.get("doi"))
+
+                # In strict OA mode, verify that an authentic direct PDF or OA candidate exists
+                if open_access_only and not pdf_url:
+                    if doi:
+                        candidates = get_oa_pdf_candidates(
+                            doi,
+                            title=item.get("title"),
+                            contact_email=contact_email,
+                            timeout=5,
+                        )
+                        if candidates:
+                            pdf_url = candidates[0][0]
+                    if not pdf_url:
+                        # Paywalled or closed access: strictly discard so it doesn't return
+                        continue
+
+                authorships = item.get("authorships", [])
+                author_names = [a.get("author", {}).get("display_name", "") for a in authorships if a.get("author")]
+                formatted_authors = ", ".join(author_names[:4]) + (" et al." if len(author_names) > 4 else "")
+                if not formatted_authors:
+                    formatted_authors = "Unknown Author"
+
                 abstract = reconstruct_abstract(item.get("abstract_inverted_index"))
                 journal = (item.get("primary_location") or {}).get("source", {}).get("display_name", "")
 
                 records.append({
-                    "index": idx,
+                    "index": len(records) + 1,
                     "title": item.get("title") or "Untitled",
                     "authors": formatted_authors,
                     "year": str(item.get("publication_year") or ""),
@@ -482,15 +515,40 @@ def search_academic_literature(
                     "citations": item.get("cited_by_count", 0),
                     "doi": doi,
                     "raw_doi": item.get("doi") or "",
-                    "open_access": "Open Access" if item.get("open_access", {}).get("is_oa") else "Paywalled",
+                    "open_access": "Open Access" if is_oa else "Paywalled",
                     "oa_status": item.get("open_access", {}).get("oa_status", ""),
                     "pdf_url": pdf_url,
                     "abstract": abstract,
                     "source_db": "OpenAlex",
                 })
 
+                if len(records) >= max_results:
+                    break
+
     except Exception:
         pass
 
     return records, total_matches
+
+
+def is_record_open_access(record: Dict, contact_email: str = "research.review@extract-tool.org") -> bool:
+    """
+    Check if a research record is Open Access (not paywalled).
+    Checks OA status flags and verifies that at least one OA PDF candidate exists.
+    """
+    oa_str = str(record.get("open_access", "")).casefold()
+    if any(k in oa_str for k in ("closed", "no", "paywall", "subscription")):
+        return False
+
+    if record.get("pdf_url"):
+        return True
+
+    doi = clean_doi(record.get("doi") or record.get("raw_doi"))
+    if not doi:
+        return False
+
+    # Check candidates
+    candidates = get_oa_pdf_candidates(doi, title=record.get("title"), contact_email=contact_email, timeout=6)
+    return len(candidates) > 0
+
 
